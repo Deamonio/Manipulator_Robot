@@ -54,14 +54,14 @@ using namespace ControlTableItem;
 #define ID5            (5u)
 #define ID6            (6u)
 
-bool torqueEn = true;
+bool passivityMode = false;
 
 int mot1Pos = 512;
 int mot2Pos = 380;
 int mot3Pos = 800;
 int mot4Pos = 700;
 int mot5Pos = 512;
-int mot6Pos = 512;
+int mot6Pos = 695;
 
 int mot1PosRead;
 int mot2PosRead;
@@ -77,7 +77,7 @@ void setup() {
   
   // Use UART port of DYNAMIXEL Shield to debug.
   Serial.begin(115200);
-  while(!DEBUG_SERIAL);
+  //while(!DEBUG_SERIAL);
 
   // Set Port baudrate to 57600bps. This has to match with DYNAMIXEL baudrate.
   dxl.begin(1000000);
@@ -117,10 +117,6 @@ void setup() {
   dxl.torqueOn(ID6);
   
 
-  
-  
-  
-  
   //start pos
   dxl.setGoalPosition(ID1, mot1Pos);
   dxl.setGoalPosition(ID2, mot2Pos);
@@ -133,27 +129,25 @@ void setup() {
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
   receiveSerial();
-  moveMotor();
-  readMotorPos();
-  //printSerial();
+  if (passivityMode) {
+    readMotorPos();
+    printSerial("Feedback");
+    delay(20);
+  }
+  
+  //printSerial2();
 }
 
-void printSerial() {
-  Serial.print(mot1PosRead);
-  Serial.print(",");
-  Serial.print(mot2PosRead);
-  Serial.print(",");
-  Serial.print(mot3PosRead);
-  Serial.print(",");
-  Serial.print(mot4PosRead);
-  Serial.print(",");
-  Serial.print(mot5PosRead);
-  Serial.print(",");
-  Serial.print(mot6PosRead);
-  Serial.println();
+void printSerial(String command) {
+  Serial.println(command+":"+String(mot1PosRead)+","+String(mot2PosRead)+","+String(mot3PosRead)+","+String(mot4PosRead)+","+String(mot5PosRead)+","+String(mot6PosRead));
 }
+
+void printSerial2() {
+  Serial.println(String(mot1Pos)+","+String(mot2Pos)+","+String(mot3Pos)+","+String(mot4Pos)+","+String(mot5Pos)+","+String(mot6Pos));
+}
+
+
 
 void readMotorPos() {
   mot1PosRead = dxl.getPresentPosition(ID1);
@@ -165,7 +159,6 @@ void readMotorPos() {
 }
 
 void moveMotor() {
-  if (torqueEn == true) {
     dxl.torqueOn(ID1);
     dxl.torqueOn(ID2);
     dxl.torqueOn(ID3);
@@ -179,36 +172,63 @@ void moveMotor() {
     dxl.setGoalPosition(ID4, mot4Pos);
     dxl.setGoalPosition(ID5, mot5Pos);
     dxl.setGoalPosition(ID6, mot6Pos);
-  }
-  else {
-    dxl.torqueOff(ID1);
-    dxl.torqueOff(ID2);
-    dxl.torqueOff(ID3);
-    dxl.torqueOff(ID4);
-    dxl.torqueOff(ID5);
-    dxl.torqueOff(ID6);
-  }
 }
 
 void receiveSerial() {
   if (Serial.available()) {
-    int n1, n2, n3, n4, n5, n6, n7;
-    String packet = Serial.readStringUntil('*');
-    sscanf(packet.c_str(), "%d,%d,%d,%d,%d,%d,%d", &n1, &n2, &n3, &n4, &n5, &n6, &n7); //torque,mot1Pos,mot2Pos,mot3Pos,mot4Pos,mot5Pos,mot6Pos
-    
-    if (n1 == 1) {
-      torqueEn = true;
-    }
-    else {
-      torqueEn = false;
-    }
+    int c, n1, n2, n3, n4, n5, n6;
 
-    mot1Pos = constrain(n2, 0, 1023);
-    mot2Pos = constrain(n3, 380, 1023);
-    mot3Pos = constrain(n4, 512, 1023);
-    mot4Pos = constrain(n5, 512, 1023);
-    mot5Pos = constrain(n6, 0, 1023);
-    mot6Pos = constrain(n7, 370, 695);
+    String packet = Serial.readStringUntil('*');
+    
+    // int colonIndex = packet.indexOf(':');
+    // if (colonIndex == -1) return; // Invalid format
+    
+    // // Extract command word and data
+    // String command = packet.substring(0, colonIndex);
+    // String data = packet.substring(colonIndex + 1);
+    
+
+    sscanf(packet.c_str(), "%d,%d,%d,%d,%d,%d,%d", &c, &n1, &n2, &n3, &n4, &n5, &n6); //mot1Pos,mot2Pos,mot3Pos,mot4Pos,mot5Pos,mot6Pos
+    
+    if (c == 0) {
+      mot1Pos = constrain(n1, 0, 1023);
+      mot2Pos = constrain(n2, 200, 836);
+      mot3Pos = constrain(n3, 512, 836);
+      mot4Pos = constrain(n4, 512, 836);
+      mot5Pos = constrain(n5, 0, 1023);
+      mot6Pos = constrain(n6, 370, 695);
+      moveMotor();
+    }
+    else if (c == 1) {
+      if (n1 ==1) {
+        dxl.torqueOn(ID1);
+        dxl.torqueOn(ID2);
+        dxl.torqueOn(ID3);
+        dxl.torqueOn(ID4);
+        dxl.torqueOn(ID5);
+        dxl.torqueOn(ID6);
+      }
+      else if (n1 == 0) {
+        dxl.torqueOff(ID1);
+        dxl.torqueOff(ID2);
+        dxl.torqueOff(ID3);
+        dxl.torqueOff(ID4);
+        dxl.torqueOff(ID5);
+        dxl.torqueOff(ID6);
+      }
+    }
+    else if (c == 3) {
+      readMotorPos();
+      printSerial("Positions");
+    }
+    else if (c == 2) {
+      if (n1 ==1) {
+        passivityMode = true;
+      }
+      else if (n1 ==0) {
+        passivityMode = false;
+      }
+    }
     
   }
 }
