@@ -19,10 +19,10 @@ from queue import Queue
 class Config:
     """시스템 설정을 관리하는 클래스"""
     # NOTE: /dev/ttyUSB0 대신 사용 환경에 맞는 포트를 지정해야 합니다.
-    PORT = '/dev/ttyACM0' 
+    PORT = '/dev/ttyACM1' 
     BAUD_RATE = 115200
-    SCREEN_WIDTH = 950
-    SCREEN_HEIGHT = 615  # 창 높이 재조정 (590 -> 615) - 하단 패널 겹침 방지 및 적절한 여백 확보
+    SCREEN_WIDTH = 1000
+    SCREEN_HEIGHT = 720  # 720 -> 750 (여유 공간 확보)
     
     KEY_REPEAT_DELAY = 50
     KEY_REPEAT_INTERVAL = 50
@@ -197,11 +197,12 @@ class MotorController:
     def __init__(self):
         self.motors = [
             MotorConfig(0, "Base", 0, 1023, 512),
-            MotorConfig(1, "Shoulder", 380, 1023, 380),
-            MotorConfig(2, "Upper_Arm", 512, 1023, 800),
-            MotorConfig(3, "Elbow", 512, 1023, 700),
-            MotorConfig(4, "Wrist", 0, 1023, 512),
-            MotorConfig(5, "Hand", 370, 695, 695),
+            MotorConfig(1, "Shoulder", 180, 845, 512),
+            MotorConfig(2, "Upper_Arm", 165, 1023, 380),
+            MotorConfig(3, "Elbow", 512, 1023, 800),
+            MotorConfig(4, "forearm", 512, 1023, 700),
+            MotorConfig(5, "Wrist", 0, 1023, 512),
+            MotorConfig(6, "Hand", 370, 695, 512),
         ]
         
         self.current_positions = [m.default_pos for m in self.motors]
@@ -211,7 +212,7 @@ class MotorController:
         self.all_torque_enabled = True
         self.torque_enabled = [True] * len(self.motors)
         self.is_passivity_first = False
-        self.passivity_initialized_motors = [False] * 6
+        self.passivity_initialized_motors = [False] * 7
         self.last_feedback_log_time = 0  # ✅ 추가: 마지막 로그 시간
         self.feedback_log_interval = 500  # ✅ 추가: 로그 간격 (ms)
         
@@ -228,17 +229,16 @@ class MotorController:
         try:
             with open('custom_presets.json', 'r') as f:
                 presets = json.load(f)
-                # 4개로 제한
                 if len(presets) > 4:
                     presets = dict(list(presets.items())[:4])
                 return presets
         except FileNotFoundError:
             # 기본 Custom 프리셋
             return {
-                "Custom 1": [512, 380, 800, 700, 512, 695],
-                "Custom 2": [512, 380, 800, 700, 512, 695],
-                "Custom 3": [512, 380, 800, 700, 512, 695],
-                "Custom 4": [512, 380, 800, 700, 512, 695],
+                "Custom 1": [512, 512, 380, 800, 700, 512, 512],
+                "Custom 2": [512, 512, 380, 800, 700, 512, 512],
+                "Custom 3": [512, 512, 380, 800, 700, 512, 512],
+                "Custom 4": [512, 512, 380, 800, 700, 512, 512],
             }
     
     def save_custom_preset(self, slot_index: int):
@@ -255,7 +255,7 @@ class MotorController:
                 # Passivity 모드에서는 즉시 현재 위치 요청
                 self.waiting_for_positions = True
                 self.passivity_presets = []
-                command = f"3,0,0,0,0,0,0*" #getpositon
+                command = f"3,0,0,0,0,0,0,0*"  # 7개 모터
                 self.serial.send(command)
                 print(f"{Colors.YELLOW}[Preset]{Colors.END} Requesting positions for '{preset_name}'...")
                 
@@ -319,13 +319,13 @@ class MotorController:
         Config.PASSIVITY_MODE = not new_state
         if Config.PASSIVITY_MODE:
             self.is_passivity_first = True
-            self.passivity_initialized_motors = [False] * 6  # 초기화
+            self.passivity_initialized_motors = [False] * 7  # 초기화
             # 수정된 명령 형식 (n1만 사용)
-            self.serial.send("2,1,0,0,0,0,0*")  # passivity on
+            self.serial.send("2,1,0,0,0,0,0,0*")  # passivity on
         else:
             self.is_passivity_first = False
-            self.passivity_initialized_motors = [False] * 6
-            self.serial.send("2,0,0,0,0,0,0*")  # passivity off
+            self.passivity_initialized_motors = [False] * 7
+            self.serial.send("2,0,0,0,0,0,0,0*")  # passivity off
         
         status = "enabled" if new_state else "disabled"
         print(f"{Colors.YELLOW}[Torque]{Colors.END} ALL motors torque {status}")
@@ -429,7 +429,7 @@ class MotorController:
                     parts = data[len("Feedback:"):].split(',')
                     
                     if len(parts) < len(self.motors):
-                        print(f"{Colors.RED}[Feedback Parse]{Colors.END} Incomplete data: {len(parts)}/6 motors")
+                        print(f"{Colors.RED}[Feedback Parse]{Colors.END} Incomplete data: {len(parts)}/7 motors")
                         return
                     
                     # ✅ 개선: 모든 모터 데이터를 먼저 검증
@@ -646,11 +646,11 @@ class UIRenderer:
         self.screen.blit(shadow_surface, (shadow_x, shadow_y))
     
     def draw_motor_gauge(self, x, y, width, height, motor_info: dict, motor_index: int):
-        """개선된 모터 게이지 (토크 버튼 제거 -> 인디케이터로 대체)"""
+        """개선된 모터 게이지 - 완전한 오버플로우 방지"""
         panel_rect = pygame.Rect(x, y, width, height)
         
         # 그림자 및 배경
-        self.draw_shadow(panel_rect, 4, 150)
+        self.draw_shadow(panel_rect, 3, 150)
         
         border_color = UIColors.BORDER_COLOR
         if motor_info['state'] == MotorState.MOVING:
@@ -658,40 +658,55 @@ class UIRenderer:
         elif motor_info['state'] == MotorState.AT_LIMIT:
             border_color = UIColors.WARNING_ORANGE
             
-        self.draw_rounded_rect(UIColors.PANEL_BG, panel_rect, radius=12, border_width=2, border_color=border_color)
+        self.draw_rounded_rect(UIColors.PANEL_BG, panel_rect, radius=10, border_width=2, border_color=border_color)
+        
+        # 내부 여백 정의
+        inner_padding = 10
+        inner_width = width - (inner_padding * 2)
         
         # 1. 헤더 (M# / Name)
         motor_num_text = self.font_tiny.render(f"M{motor_index + 1}", True, UIColors.TEXT_LIGHT)
-        name_text = self.font_small.render(motor_info['name'], True, UIColors.ACCENT_DARK)
         
-        self.screen.blit(motor_num_text, (x + 10, y + 10))
-        self.screen.blit(name_text, (x + 35, y + 8))
+        # 이름 길이 제한 (폭 기반 자동 축소)
+        motor_name = motor_info['name']
+        name_text = self.font_small.render(motor_name, True, UIColors.ACCENT_DARK)
+        
+        # 이름이 너무 길면 축소
+        available_width = inner_width - motor_num_text.get_width() - 30 - 40  # 30=간격, 40=토크 인디케이터
+        if name_text.get_width() > available_width:
+            # 글자 수 줄이기
+            while name_text.get_width() > available_width and len(motor_name) > 3:
+                motor_name = motor_name[:-1]
+                name_text = self.font_small.render(motor_name + ".", True, UIColors.ACCENT_DARK)
+        
+        self.screen.blit(motor_num_text, (x + inner_padding, y + 10))
+        self.screen.blit(name_text, (x + inner_padding + 28, y + 8))
         
         # 토크 상태 인디케이터 (우측 상단)
-        torque_indicator_x = x + width - 25
-        torque_indicator_y = y + 15
+        torque_indicator_x = x + width - inner_padding - 10
+        torque_indicator_y = y + 16
         torque_color = UIColors.SUCCESS_GREEN if motor_info['torque_enabled'] else UIColors.ERROR_RED
         pygame.draw.circle(self.screen, torque_color, (torque_indicator_x, torque_indicator_y), 6)
         
-        # 2. 현재 값 및 각도
+        # 2. 현재 값 및 각도 (좌우 배치)
         
-        # 현재 위치 (Int)
+        # 좌측: 현재 위치 (큰 숫자)
         value_text = self.font_medium.render(f"{int(motor_info['current'])}", True, UIColors.ACCENT_BLUE)
-        self.screen.blit(value_text, (x + 10, y + 30)) 
+        self.screen.blit(value_text, (x + inner_padding, y + 35))
         
-        # 목표 위치 (Target)
+        # 목표 위치 (작은 텍스트)
         target_text = self.font_tiny.render(f"Target: {int(motor_info['target'])}", True, UIColors.TEXT_GRAY)
-        self.screen.blit(target_text, (x + 10, y + 60)) 
+        self.screen.blit(target_text, (x + inner_padding, y + 65))
         
-        # 각도
+        # 우측: 각도 표시
         angle_text = self.font_small.render(f"{motor_info['angle']:.1f}°", True, UIColors.ACCENT_DARK)
-        angle_x = x + width - angle_text.get_width() - 10
-        self.screen.blit(angle_text, (angle_x, y + 30))
+        angle_x = x + width - inner_padding - angle_text.get_width()
+        self.screen.blit(angle_text, (angle_x, y + 42))
         
         # 3. 진행 바
-        bar_x = x + 10
-        bar_y = y + 80
-        bar_width = width - 20
+        bar_x = x + inner_padding
+        bar_y = y + 88
+        bar_width = inner_width
         bar_height = 12
         
         bar_bg = pygame.Rect(bar_x, bar_y, bar_width, bar_height)
@@ -704,13 +719,12 @@ class UIRenderer:
             filled_width = int(bar_width * progress)
             
             # 진행 바 색상
-            color = UIColors.ACCENT_BLUE
             if progress < 0.1 or progress > 0.9:
                 color = UIColors.ERROR_RED
             elif progress < 0.25 or progress > 0.75:
-                 color = UIColors.WARNING_ORANGE
+                color = UIColors.WARNING_ORANGE
             else:
-                 color = UIColors.SUCCESS_GREEN
+                color = UIColors.SUCCESS_GREEN
 
             if filled_width > 4:
                 filled_rect = pygame.Rect(bar_x, bar_y, filled_width, bar_height)
@@ -718,23 +732,26 @@ class UIRenderer:
         
         # 범위 표시
         min_text = self.font_tiny.render(f"{motor_info['min']}", True, UIColors.TEXT_GRAY)
-        self.screen.blit(min_text, (bar_x, bar_y + bar_height + 3))
+        self.screen.blit(min_text, (bar_x, bar_y + bar_height + 2))
         
         max_text = self.font_tiny.render(f"{motor_info['max']}", True, UIColors.TEXT_GRAY)
-        self.screen.blit(max_text, (bar_x + bar_width - max_text.get_width(), bar_y + bar_height + 3))
+        max_x = bar_x + bar_width - max_text.get_width()
+        self.screen.blit(max_text, (max_x, bar_y + bar_height + 2))
     
     def draw_torque_control_panel(self, x, y, width, height, all_torque_enabled: bool):
-        """통합 토크 제어 패널 (작고 간결하게 재디자인)"""
+        """토크 제어 패널 - 크기 축소"""
         panel_rect = pygame.Rect(x, y, width, height)
         self.draw_shadow(panel_rect, 3, 150)
-        self.draw_rounded_rect(UIColors.PANEL_BG, panel_rect, radius=12, border_width=1, border_color=UIColors.BORDER_COLOR)
+        self.draw_rounded_rect(UIColors.PANEL_BG, panel_rect, radius=10, border_width=1, border_color=UIColors.BORDER_COLOR)
+        
+        inner_padding = 12
         
         # 제목
         title = self.font_small.render("Torque Control", True, UIColors.ACCENT_DARK)
-        self.screen.blit(title, (x + 10, y + 10))
+        self.screen.blit(title, (x + inner_padding, y + 10))
         
         # 토크 버튼
-        button_rect = pygame.Rect(x + 10, y + 35, width - 20, 45) # 높이 45
+        button_rect = pygame.Rect(x + inner_padding, y + 35, width - inner_padding * 2, 42)
         
         # 버튼 색상
         base_color = UIColors.TORQUE_ON if all_torque_enabled else UIColors.TORQUE_OFF
@@ -744,126 +761,120 @@ class UIRenderer:
         is_hover = button_rect.collidepoint(mouse_pos)
         
         if is_hover:
-             base_color = tuple(min(255, c + 30) for c in base_color)
+            base_color = tuple(min(255, c + 30) for c in base_color)
         
         self.draw_shadow(button_rect, 2, 100)
-        self.draw_rounded_rect(base_color, button_rect, 8)
+        self.draw_rounded_rect(base_color, button_rect, 7)
         
-        # 텍스트만 사용 (아이콘 제거 및 ALL -> 단일 단어로 수정)
+        # 텍스트
         status_text = "TORQUE ON" if all_torque_enabled else "TORQUE OFF"
-        
         status_surface = self.font_small.render(status_text, True, UIColors.WHITE)
         
-        # 배치 (중앙 정렬)
+        # 중앙 정렬
         status_x = button_rect.centerx - status_surface.get_width() // 2
         status_y = button_rect.centery - status_surface.get_height() // 2
         self.screen.blit(status_surface, (status_x, status_y))
 
-        # 힌트 텍스트 - 버튼 하단과 패널 하단 사이 중간 위치로 조정
-        hint = self.font_tiny.render("Z or Click to Toggle", True, UIColors.TEXT_GRAY)
+        # 힌트 텍스트
+        hint = self.font_tiny.render("Z or Click", True, UIColors.TEXT_GRAY)
         hint_x = x + width // 2 - hint.get_width() // 2
-        # 버튼 하단(y + 80)과 패널 하단(y + height) 사이의 중간 지점
-        hint_y = y + 80 + (height - 80) // 2 - hint.get_height() // 2
+        hint_y = y + 85
         self.screen.blit(hint, (hint_x, hint_y))
         
         return button_rect
     
     def draw_preset_panel(self, x, y, width, height, default_preset: List[int], 
                           custom_presets: dict, active_preset: Optional[str]):
-        """프리셋 패널 (Default 1개 + Custom 4개)"""
+        """프리셋 패널 - 하단 정리 버전"""
         panel_rect = pygame.Rect(x, y, width, height)
-        self.draw_shadow(panel_rect, 4, 150)
-        self.draw_rounded_rect(UIColors.PANEL_BG, panel_rect, radius=12, border_width=1, border_color=UIColors.BORDER_COLOR)
+        self.draw_shadow(panel_rect, 3, 150)
+        self.draw_rounded_rect(UIColors.PANEL_BG, panel_rect, radius=10, border_width=1, border_color=UIColors.BORDER_COLOR)
+        
+        inner_padding = 12
         
         # 제목
         title = self.font_small.render("Quick Presets", True, UIColors.ACCENT_DARK)
-        self.screen.blit(title, (x + 10, y + 10))
+        self.screen.blit(title, (x + inner_padding, y + 10))
         
-        save_hint = self.font_tiny.render("Ctrl+F2-F5: Save Custom", True, UIColors.TEXT_GRAY)
-        self.screen.blit(save_hint, (x + 10, y + 30))
+        save_hint = self.font_tiny.render("Ctrl+F2-F5: Save", True, UIColors.TEXT_GRAY)
+        self.screen.blit(save_hint, (x + inner_padding, y + 28))
         
         # 프리셋 버튼들
-        button_y = y + 55
+        button_y = y + 50
         button_height = 32
         button_spacing = 8
         
         button_rects = []
         mouse_pos = pygame.mouse.get_pos()
         
-        # 1. Default 프리셋 (F1) - 고유한 색상
-        default_rect = pygame.Rect(x + 10, button_y, width - 20, button_height)
+        # 1. Default 프리셋 (F1)
+        default_rect = pygame.Rect(x + inner_padding, button_y, width - inner_padding * 2, button_height)
         button_rects.append({'rect': default_rect, 'name': 'Default', 'type': 'default', 'index': -1})
         
         is_active = (active_preset == 'Default')
-        # Default는 녹색 계열 사용
-        color = (34, 197, 94) if is_active else (22, 163, 74)  # 밝은 녹색 / 기본 녹색
+        color = (34, 197, 94) if is_active else (22, 163, 74)
         border_color = (21, 128, 61) if is_active else (22, 101, 52)
         
         if default_rect.collidepoint(mouse_pos):
             color = tuple(min(255, c + 25) for c in color)
         
         self.draw_shadow(default_rect, 2, 100)
-        self.draw_rounded_rect(color, default_rect, 6)
-        pygame.draw.rect(self.screen, border_color, default_rect, 1, border_radius=6)
+        self.draw_rounded_rect(color, default_rect, 5)
+        pygame.draw.rect(self.screen, border_color, default_rect, 1, border_radius=5)
         
-        # Default 텍스트 (아이콘 제거)
+        # Default 텍스트
         text = self.font_small.render("Default", True, UIColors.WHITE)
-        text_x = x + 20  # 왼쪽 여백 조정
+        text_x = x + inner_padding + 10
         text_y = default_rect.centery - text.get_height() // 2
         self.screen.blit(text, (text_x, text_y))
         
         hint = self.font_tiny.render("F1", True, UIColors.WHITE)
-        self.screen.blit(hint, (x + width - 30, button_y + 9))
+        self.screen.blit(hint, (x + width - inner_padding - 25, button_y + 10))
         
         button_y += button_height + button_spacing
         
-        # === 구분선 추가 (수정된 부분) ===
-        divider_y = button_y + 8
+        # 구분선
+        divider_y = button_y + 6
         
-        # 구분선 중앙에 "CUSTOM PRESETS" 텍스트 먼저 렌더링
-        custom_label = self.font_tiny.render("CUSTOM PRESETS", True, UIColors.TEXT_LIGHT)
+        custom_label = self.font_tiny.render("CUSTOM", True, UIColors.TEXT_LIGHT)
         label_width = custom_label.get_width()
         label_x = x + width // 2 - label_width // 2
-        self.screen.blit(custom_label, (label_x, divider_y - 6))
+        self.screen.blit(custom_label, (label_x, divider_y - 5))
         
-        # 텍스트 좌우로 구분선 그리기
-        line_margin = 8  # 텍스트와 선 사이 간격
-        left_line_start = x + 20
+        line_margin = 6
+        left_line_start = x + inner_padding + 10
         left_line_end = label_x - line_margin
         right_line_start = label_x + label_width + line_margin
-        right_line_end = x + width - 20
+        right_line_end = x + width - inner_padding - 10
         
-        # 왼쪽 선
         pygame.draw.line(self.screen, UIColors.BORDER_COLOR, 
                         (left_line_start, divider_y), 
                         (left_line_end, divider_y), 1)
         
-        # 오른쪽 선
         pygame.draw.line(self.screen, UIColors.BORDER_COLOR, 
                         (right_line_start, divider_y), 
                         (right_line_end, divider_y), 1)
         
-        button_y += 22  # 구분선 이후 간격
+        button_y += 18
         
-        # 2. Custom 프리셋 4개 (F2~F5) - 보라색 계열
+        # 2. Custom 프리셋 4개
         custom_preset_names = [f"Custom {i+1}" for i in range(4)]
         
         for i, preset_name in enumerate(custom_preset_names):
-            custom_rect = pygame.Rect(x + 10, button_y + i * (button_height + button_spacing), 
-                                     width - 20, button_height)
+            custom_rect = pygame.Rect(x + inner_padding, button_y + i * (button_height + button_spacing), 
+                                     width - inner_padding * 2, button_height)
             button_rects.append({'rect': custom_rect, 'name': preset_name, 'type': 'custom', 'index': i})
             
             is_active = (active_preset == preset_name)
-            # Custom은 보라색 계열 사용
-            color = (147, 51, 234) if is_active else (124, 58, 237)  # 밝은 보라 / 기본 보라
+            color = (147, 51, 234) if is_active else (124, 58, 237)
             border_color = (126, 34, 206) if is_active else (109, 40, 217)
             
             if custom_rect.collidepoint(mouse_pos):
                 color = tuple(min(255, c + 20) for c in color)
             
             self.draw_shadow(custom_rect, 2, 100)
-            self.draw_rounded_rect(color, custom_rect, 6)
-            pygame.draw.rect(self.screen, border_color, custom_rect, 1, border_radius=6)
+            self.draw_rounded_rect(color, custom_rect, 5)
+            pygame.draw.rect(self.screen, border_color, custom_rect, 1, border_radius=5)
             
             text = self.font_small.render(preset_name, True, UIColors.WHITE)
             text_x = custom_rect.centerx - text.get_width() // 2
@@ -871,96 +882,116 @@ class UIRenderer:
             self.screen.blit(text, (text_x, text_y))
             
             hint = self.font_tiny.render(f"F{i+2}", True, UIColors.WHITE)
-            self.screen.blit(hint, (x + width - 30, button_y + i * (button_height + button_spacing) + 9))
+            self.screen.blit(hint, (x + width - inner_padding - 25, button_y + i * (button_height + button_spacing) + 10))
+        
+        # 마지막 버튼 아래 여백 (패널 끝 - 더 이상 빈 공간 없음)
+        # button_y + 3 * (button_height + button_spacing) + button_height + 10 = 대략 280px
         
         return button_rects
     
     def draw_control_panel(self, panel_y: int, status_msg: str, is_connected: bool, is_logging: bool, log_filename: str):
-        """하단 제어 패널 - 재구성된 레이아웃"""
+        """하단 제어 패널 - 완전한 오버플로우 방지"""
         panel_x = 15
         panel_width = Config.SCREEN_WIDTH - 30
-        panel_height = 100
+        panel_height = 105
         
         panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
         self.draw_shadow(panel_rect, 3, 100)
-        self.draw_rounded_rect(UIColors.PANEL_BG, panel_rect, radius=12, border_width=1, border_color=UIColors.BORDER_COLOR)
+        self.draw_rounded_rect(UIColors.PANEL_BG, panel_rect, radius=10, border_width=1, border_color=UIColors.BORDER_COLOR)
+        
+        inner_padding = 20
+        section_width = (panel_width - inner_padding * 2) // 3
         
         # === 좌측 영역: 시스템 상태 ===
-        left_section_x = panel_x + 20
+        left_section_x = panel_x + inner_padding
         
         # 연결 상태 인디케이터
         status_color = UIColors.SUCCESS_GREEN if is_connected else UIColors.ERROR_RED
-        pygame.draw.circle(self.screen, status_color, (left_section_x, panel_y + 25), 8)
+        pygame.draw.circle(self.screen, status_color, (left_section_x, panel_y + 22), 7)
         
         # 시스템 상태 텍스트
-        status_title = self.font_medium.render("System Status", True, UIColors.ACCENT_DARK)
+        status_title = self.font_small.render("System Status", True, UIColors.ACCENT_DARK)
         self.screen.blit(status_title, (left_section_x + 20, panel_y + 15))
         
-        status_text_str = "Connected" if is_connected else "Simulation Mode"
-        status_detail = self.font_small.render(status_text_str, True, UIColors.TEXT_GRAY)
-        self.screen.blit(status_detail, (left_section_x + 20, panel_y + 40))
+        status_text_str = "Connected" if is_connected else "Simulation"
+        status_detail = self.font_tiny.render(status_text_str, True, UIColors.TEXT_GRAY)
+        self.screen.blit(status_detail, (left_section_x + 20, panel_y + 38))
         
         # 마지막 동작
         action_label = self.font_tiny.render("Last Action:", True, UIColors.TEXT_LIGHT)
-        self.screen.blit(action_label, (left_section_x + 20, panel_y + 60))
+        self.screen.blit(action_label, (left_section_x + 20, panel_y + 58))
         
-        action_detail = self.font_small.render(status_msg, True, UIColors.ACCENT_BLUE)
+        # 액션 텍스트 폭 제한
+        max_width = section_width - 30
+        truncated_msg = status_msg
+        action_detail = self.font_small.render(truncated_msg, True, UIColors.ACCENT_BLUE)
+        
+        while action_detail.get_width() > max_width and len(truncated_msg) > 10:
+            truncated_msg = truncated_msg[:-4] + "..."
+            action_detail = self.font_small.render(truncated_msg, True, UIColors.ACCENT_BLUE)
+        
         self.screen.blit(action_detail, (left_section_x + 20, panel_y + 75))
         
         # 구분선
-        divider1_x = panel_x + panel_width // 3 - 10
+        divider1_x = panel_x + section_width + inner_padding
         pygame.draw.line(self.screen, UIColors.BORDER_COLOR, 
                          (divider1_x, panel_y + 15), 
                          (divider1_x, panel_y + panel_height - 15), 2)
         
         # === 중앙 영역: 데이터 로깅 ===
-        center_section_x = panel_x + panel_width // 3 + 10
+        center_section_x = divider1_x + inner_padding
         
         # 로깅 상태
-        log_title = self.font_medium.render("Data Logging", True, UIColors.ACCENT_DARK)
+        log_title = self.font_small.render("Data Logging", True, UIColors.ACCENT_DARK)
         self.screen.blit(log_title, (center_section_x, panel_y + 15))
         
         log_status_icon = "●" if is_logging else "○"
-        log_status_text = f"{log_status_icon} {'Recording' if is_logging else 'Paused'}"
+        log_status_text = f"{log_status_icon} {'Rec' if is_logging else 'Paused'}"
         log_status_color = UIColors.ERROR_RED if is_logging else UIColors.TEXT_GRAY
         
-        log_status = self.font_small.render(log_status_text, True, log_status_color)
-        self.screen.blit(log_status, (center_section_x, panel_y + 40))
+        log_status = self.font_tiny.render(log_status_text, True, log_status_color)
+        self.screen.blit(log_status, (center_section_x, panel_y + 38))
         
         # 파일명
-        filename_short = log_filename[-25:] if len(log_filename) > 25 else log_filename
-        log_file_label = self.font_tiny.render("File:", True, UIColors.TEXT_LIGHT)
-        self.screen.blit(log_file_label, (center_section_x, panel_y + 60))
-        
+        filename_short = log_filename
         log_file = self.font_tiny.render(filename_short, True, UIColors.TEXT_GRAY)
+        
+        # 파일명 폭 제한
+        while log_file.get_width() > section_width - 20 and len(filename_short) > 15:
+            filename_short = "..." + filename_short[-15:]
+            log_file = self.font_tiny.render(filename_short, True, UIColors.TEXT_GRAY)
+        
+        log_file_label = self.font_tiny.render("File:", True, UIColors.TEXT_LIGHT)
+        self.screen.blit(log_file_label, (center_section_x, panel_y + 58))
         self.screen.blit(log_file, (center_section_x, panel_y + 75))
         
         # 구분선
-        divider2_x = panel_x + 2 * panel_width // 3 - 10
+        divider2_x = divider1_x + section_width + inner_padding
         pygame.draw.line(self.screen, UIColors.BORDER_COLOR, 
                          (divider2_x, panel_y + 15), 
                          (divider2_x, panel_y + panel_height - 15), 2)
         
         # === 우측 영역: 키보드 단축키 ===
-        right_section_x = panel_x + 2 * panel_width // 3 + 10
+        right_section_x = divider2_x + inner_padding
         
-        shortcuts_title = self.font_medium.render("Quick Controls", True, UIColors.ACCENT_DARK)
+        shortcuts_title = self.font_small.render("Controls", True, UIColors.ACCENT_DARK)
         self.screen.blit(shortcuts_title, (right_section_x, panel_y + 15))
         
         shortcuts = [
-            ("Q/A W/S E/D", "Motor 1-3 Control"),
-            ("R/F T/G Y/H", "Motor 4-6 Control"),
-            ("Shift + Key", "Fine Control (Slow)"),
+            ("Q/A W/S E/D", "M1-3"),
+            ("R/F T/G Y/H", "M4-6"),
+            ("U/J", "M7"),
+            ("Shift", "Fine"),
         ]
         
-        shortcut_y = panel_y + 40
+        shortcut_y = panel_y + 38
         for key, desc in shortcuts:
             key_text = self.font_tiny.render(key, True, UIColors.ACCENT_BLUE)
             desc_text = self.font_tiny.render(f"- {desc}", True, UIColors.TEXT_GRAY)
             
             self.screen.blit(key_text, (right_section_x, shortcut_y))
-            self.screen.blit(desc_text, (right_section_x + 85, shortcut_y))
-            shortcut_y += 16
+            self.screen.blit(desc_text, (right_section_x + 78, shortcut_y))
+            shortcut_y += 14
 
 # ========================================================================================================
 # Main Application Class
@@ -993,6 +1024,7 @@ class RobotControlApp:
             pygame.K_r: (3, "increase"), pygame.K_f: (3, "decrease"),
             pygame.K_t: (4, "increase"), pygame.K_g: (4, "decrease"),
             pygame.K_y: (5, "increase"), pygame.K_h: (5, "decrease"),
+            pygame.K_u: (6, "increase"), pygame.K_j: (6, "decrease"),  # 7번 모터 추가
         }
         
         self.motor_info_cache = []
@@ -1163,73 +1195,81 @@ class RobotControlApp:
         self.logger.log(self.controller.current_positions)
     
     def render(self):
-        """화면 렌더링"""
+        """화면 렌더링 - 레이아웃 최적화"""
         self.screen.fill(UIColors.LIGHT_GRAY)
         
-        # 고정 상수 설정
+        # ===== 레이아웃 상수 =====
         PADDING = 15
-        SPACING = 15
-        GAUGE_WIDTH = 355
-        GAUGE_HEIGHT = 120
-        PRESET_WIDTH = 180
-        TORQUE_PANEL_HEIGHT = 100
-        CONTROL_PANEL_HEIGHT = 100
-        CONTROL_PANEL_BOTTOM_PADDING = 15
+        SPACING = 12
         
-        # 1. 헤더
+        # 모터 게이지 (2열 4행) - 폭 증가
+        GAUGE_WIDTH = 360  # 340 -> 360 (20px 증가)
+        GAUGE_HEIGHT = 120
+        
+        # 우측 패널
+        RIGHT_PANEL_WIDTH = 230
+        TORQUE_PANEL_HEIGHT = 110
+        PRESET_PANEL_HEIGHT = 280  # 320 -> 280 (하단 여백 제거)
+        
+        # 하단 패널
+        CONTROL_PANEL_HEIGHT = 105
+        
+        # ===== 1. 헤더 =====
         header = self.renderer.font_title.render("Manipulator Robot Control Dashboard", True, UIColors.ACCENT_DARK)
         self.screen.blit(header, (PADDING, PADDING))
         
         subtitle = self.renderer.font_tiny.render(
-            f"6-DOF Control System | Dev Mode: {Config.DEV_MODE} | Passivity Mode: {Config.PASSIVITY_MODE}", 
+            f"7-DOF Control System | Dev: {Config.DEV_MODE} | Passivity: {Config.PASSIVITY_MODE}", 
             True, UIColors.TEXT_GRAY
         )
-        self.screen.blit(subtitle, (PADDING, PADDING + 45))
+        self.screen.blit(subtitle, (PADDING, PADDING + 35))
         
-        # 2. 모터 게이지 섹션 (2열 3행)
-        start_x = PADDING
-        start_y = PADDING + 80
+        # ===== 2. 모터 게이지 섹션 (2열 4행) =====
+        gauge_start_x = PADDING
+        gauge_start_y = PADDING + 60
         
         self.motor_info_cache = []
-        for i in range(6):
-            row = i // 2
+        for i in range(7):  # 7개 모터
+            row = i // 2  # 2열 배치
             col = i % 2
             
-            x = start_x + col * (GAUGE_WIDTH + SPACING)
-            y = start_y + row * (GAUGE_HEIGHT + SPACING)
+            x = gauge_start_x + col * (GAUGE_WIDTH + SPACING)
+            y = gauge_start_y + row * (GAUGE_HEIGHT + SPACING)
             
             motor_info = self.controller.get_motor_info(i)
             self.motor_info_cache.append(motor_info)
             self.renderer.draw_motor_gauge(x, y, GAUGE_WIDTH, GAUGE_HEIGHT, motor_info, i)
         
-        # 메인 컨텐츠 영역의 가장 아래쪽 Y 좌표 계산
-        main_content_height = 3 * GAUGE_HEIGHT + 2 * SPACING
-        main_content_bottom_y = start_y + main_content_height
-        
-        # 3. 우측 패널 영역
-        right_panel_x = PADDING + 2 * GAUGE_WIDTH + SPACING * 2
-        right_panel_y = start_y
+        # ===== 3. 우측 패널 영역 =====
+        right_panel_x = gauge_start_x + 2 * GAUGE_WIDTH + SPACING * 2
+        right_panel_y = gauge_start_y
         
         # 3-1. 토크 제어 패널 (상단)
         self.torque_button_rect_cache = self.renderer.draw_torque_control_panel(
-            right_panel_x, right_panel_y, PRESET_WIDTH, TORQUE_PANEL_HEIGHT,
+            right_panel_x, right_panel_y, RIGHT_PANEL_WIDTH, TORQUE_PANEL_HEIGHT,
             self.controller.all_torque_enabled
         )
         
-        # 3-2. 프리셋 패널 (하단)
+        # 3-2. 프리셋 패널 (중단) - 고정 높이
         preset_y = right_panel_y + TORQUE_PANEL_HEIGHT + SPACING
-        preset_height = main_content_height - TORQUE_PANEL_HEIGHT - SPACING
         
         self.preset_rects_cache = self.renderer.draw_preset_panel(
-            right_panel_x, preset_y, PRESET_WIDTH, preset_height, 
+            right_panel_x, preset_y, RIGHT_PANEL_WIDTH, PRESET_PANEL_HEIGHT, 
             self.controller.default_preset,
             self.controller.custom_presets, 
             self.active_preset
         )
         
-        # 4. 하단 제어 패널
-        SPACING_BETWEEN_PANELS = 15
-        panel_y = main_content_bottom_y + SPACING_BETWEEN_PANELS
+        # ===== 4. 하단 제어 패널 =====
+        # 모터 게이지 영역의 실제 높이 계산
+        motor_section_bottom = gauge_start_y + 4 * GAUGE_HEIGHT + 3 * SPACING
+        
+        # 하단 패널 위치 (모터 섹션과 충분한 간격)
+        panel_y = motor_section_bottom + SPACING + 5  # 여유 5px 추가
+        
+        # 화면을 벗어나는 경우 방지
+        if panel_y + CONTROL_PANEL_HEIGHT > Config.SCREEN_HEIGHT - PADDING:
+            panel_y = Config.SCREEN_HEIGHT - CONTROL_PANEL_HEIGHT - PADDING
         
         self.renderer.draw_control_panel(
             panel_y,
@@ -1284,8 +1324,8 @@ def print_banner():
   {Colors.GREEN}██║  ██║╚██████╔╝██████╔╝╚██████╔╝   ██║{Colors.CYAN}
   {Colors.GREEN}╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝    ╚═╝{Colors.CYAN}
 
-  {Colors.YELLOW}6-DOF Robotic Arm Control System{Colors.CYAN}
-  {Colors.WHITE}Version 2.0 | Python + PyGame + Serial Communication{Colors.CYAN}
+  {Colors.YELLOW}7-DOF Robotic Arm Control System{Colors.CYAN}
+  {Colors.WHITE}Version 2.1 | Python + PyGame + Serial Communication{Colors.CYAN}
 
 ════════════════════════════════════════════════════════════════════════════════{Colors.END}
 """
