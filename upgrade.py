@@ -213,16 +213,18 @@ class MotorController:
         self.torque_enabled = [True] * len(self.motors)
         self.is_passivity_first = False
         self.passivity_initialized_motors = [False] * 7
-        self.last_feedback_log_time = 0  # ✅ 추가: 마지막 로그 시간
-        self.feedback_log_interval = 500  # ✅ 추가: 로그 간격 (ms)
+        self.last_feedback_log_time = 0
+        self.feedback_log_interval = 500
         
-        # ✅ 추가: Passivity 모드에서 부드러운 UI 업데이트를 위한 변수
-        self.display_positions = [m.default_pos for m in self.motors]  # UI 표시용 위치
-        self.passivity_smoothness = 0.15  # 부드러운 전환 계수 (0.1~0.2 권장)
+        # UI 표시용 부드러운 위치 (모든 모드에서 사용)
+        self.display_positions = [m.default_pos for m in self.motors]
+        self.ui_smoothness = 0.15  # UI 부드러움 계수
         
         self.default_preset = [m.default_pos for m in self.motors]
         self.custom_presets = self._load_custom_presets()
         self.serial = SerialCommunicator()
+        self.waiting_for_positions = False  # 프리셋 저장용 위치 요청 플래그
+        self.passivity_presets = []  # 프리셋 저장용 임시 버퍼
     
     def _load_custom_presets(self) -> dict:
         """사용자 지정 프리셋 불러오기"""
@@ -319,13 +321,14 @@ class MotorController:
         Config.PASSIVITY_MODE = not new_state
         if Config.PASSIVITY_MODE:
             self.is_passivity_first = True
-            self.passivity_initialized_motors = [False] * 7  # 초기화
-            # 수정된 명령 형식 (n1만 사용)
-            self.serial.send("2,1,0,0,0,0,0,0*")  # passivity on
+            self.passivity_initialized_motors = [False] * 7
+            # Passivity 모드 시작: 피드백 요청 시작
+            self.serial.send("2,1,0,0,0,0,0,0*")
         else:
             self.is_passivity_first = False
             self.passivity_initialized_motors = [False] * 7
-            self.serial.send("2,0,0,0,0,0,0,0*")  # passivity off
+            # Normal 모드 복귀: 피드백 요청 중단
+            self.serial.send("2,0,0,0,0,0,0,0*")
         
         status = "enabled" if new_state else "disabled"
         print(f"{Colors.YELLOW}[Torque]{Colors.END} ALL motors torque {status}")
@@ -363,39 +366,29 @@ class MotorController:
         return True
     
     def update_positions(self):
-        """현재 위치를 목표 위치로 부드럽게 이동 (시뮬레이션 + Passivity UI)"""
+        """현재 위치를 목표 위치로 부드럽게 이동 (UI용)"""
         
-        if not Config.PASSIVITY_MODE:
-            # ✅ 일반 모드: 항상 부드러운 시뮬레이션 적용 (UI 반응성)
-            for i in range(len(self.motors)):
-                diff = self.target_positions[i] - self.current_positions[i]
-                
-                if abs(diff) > 0.5:
-                    self.velocities[i] = diff * Config.MOTION_SMOOTHNESS
-                    self.current_positions[i] += self.velocities[i]
-                    self.motor_states[i] = MotorState.MOVING
-                else:
-                    self.current_positions[i] = self.target_positions[i]
-                    self.velocities[i] = 0.0
-                    if self.motor_states[i] == MotorState.MOVING:
-                        self.motor_states[i] = MotorState.IDLE
-        
-        # ✅ 실제 연결 시에는 피드백으로 current_positions를 보정
-        # process_feedback()에서 실제 위치 수신 시 current_positions 덮어씀
-        else:
-            # ✅ Passivity 모드: display_positions를 target_positions로 부드럽게 이동
-            for i in range(len(self.motors)):
-                diff = self.target_positions[i] - self.display_positions[i]
-                
-                if abs(diff) > 0.5:
-                    # 부드러운 전환
-                    self.display_positions[i] += diff * self.passivity_smoothness
-                else:
-                    self.display_positions[i] = self.target_positions[i]
+        # 모든 모드에서 display_positions를 target_positions로 부드럽게 이동
+        for i in range(len(self.motors)):
+            diff = self.target_positions[i] - self.display_positions[i]
             
-            # current_positions를 display_positions와 동기화 (UI용)
-            self.current_positions = self.display_positions.copy()
-    
+            if abs(diff) > 0.5:
+                # 부드러운 전환
+                self.display_positions[i] += diff * self.ui_smoothness
+            else:
+                self.display_positions[i] = self.target_positions[i]
+            
+            # 모터 상태 업데이트
+            if abs(self.display_positions[i] - self.target_positions[i]) < 2:
+                if self.motor_states[i] == MotorState.MOVING:
+                    self.motor_states[i] = MotorState.IDLE
+            else:
+                if self.motor_states[i] != MotorState.AT_LIMIT:
+                    self.motor_states[i] = MotorState.MOVING
+        
+        # current_positions를 display_positions와 동기화 (UI용)
+        self.current_positions = self.display_positions.copy()
+
     def send_control_command(self):
         """위치 제어 명령 전송 - Passivity 모드에서는 비활성화"""
         if Config.PASSIVITY_MODE:
@@ -411,7 +404,14 @@ class MotorController:
         self.serial.send(command)
     
     def process_feedback(self):
-        """피드백 데이터 처리 (매 프레임 호출) - 개선된 버전"""
+        """피드백 데이터 처리 - Passivity 모드에서만 실행"""
+        # Normal 모드에서는 피드백 처리하지 않음
+        if not Config.PASSIVITY_MODE and not self.waiting_for_positions:
+            # 수신 큐 비우기 (버퍼 오버플로우 방지)
+            while self.serial.get_received_data() is not None:
+                pass
+            return
+        
         data = self.serial.get_received_data()
         if data:
             try:
@@ -432,7 +432,7 @@ class MotorController:
                         print(f"{Colors.RED}[Feedback Parse]{Colors.END} Incomplete data: {len(parts)}/7 motors")
                         return
                     
-                    # ✅ 개선: 모든 모터 데이터를 먼저 검증
+                    # 모든 모터 데이터 파싱
                     new_positions = []
                     parse_success = True
                     
@@ -448,39 +448,26 @@ class MotorController:
                     if not parse_success:
                         return
                     
-                    # ✅ 개선: 데이터 처리 로직
-                    if not Config.PASSIVITY_MODE:
-                        # 일반 모드: 실시간 피드백으로 current_positions 업데이트
-                        for i in range(len(self.motors)):
+                    # Passivity 모드: 실시간 피드백 처리
+                    for i in range(len(self.motors)):
+                        if not self.passivity_initialized_motors[i]:
+                            # 첫 수신 데이터로 동기화
+                            self.target_positions[i] = new_positions[i]
+                            self.display_positions[i] = new_positions[i]
                             self.current_positions[i] = new_positions[i]
-                            
-                            # 모터 상태 업데이트
-                            if abs(self.current_positions[i] - self.target_positions[i]) < 2:
-                                self.motor_states[i] = MotorState.IDLE
-                            else:
-                                self.motor_states[i] = MotorState.MOVING
-                    else:
-                        # Passivity 모드: 각 모터별 개별 초기화 후 부드러운 추적
-                        for i in range(len(self.motors)):
-                            if not self.passivity_initialized_motors[i]:
-                                # 첫 수신 데이터로 동기화
-                                self.current_positions[i] = new_positions[i]
-                                self.target_positions[i] = new_positions[i]
-                                self.display_positions[i] = new_positions[i]
-                                self.passivity_initialized_motors[i] = True
-                                print(f"{Colors.GREEN}[Passivity Init]{Colors.END} Motor {i+1} synced: {new_positions[i]:.1f}")
-                            else:
-                                # 목표 위치만 업데이트 (UI는 부드럽게 따라감)
-                                self.target_positions[i] = new_positions[i]
-                            
-                            self.motor_states[i] = MotorState.IDLE
+                            self.passivity_initialized_motors[i] = True
+                            print(f"{Colors.GREEN}[Passivity Init]{Colors.END} Motor {i+1} synced: {new_positions[i]:.1f}")
+                        else:
+                            # 목표 위치만 업데이트 (UI는 부드럽게 따라감)
+                            self.target_positions[i] = new_positions[i]
+                        
+                        self.motor_states[i] = MotorState.IDLE
                     
-                    # ✅ 개선: 로그 출력 제어 (정확한 시간 기반)
+                    # 로그 출력 제어
                     current_time = pygame.time.get_ticks()
                     if current_time - self.last_feedback_log_time >= self.feedback_log_interval:
-                        mode_str = "Passivity" if Config.PASSIVITY_MODE else "Normal"
                         pos_str = ', '.join([f"M{i+1}:{int(p)}" for i, p in enumerate(new_positions)])
-                        print(f"{Colors.CYAN}[RX Feedback ({mode_str})]{Colors.END} {pos_str}")
+                        print(f"{Colors.CYAN}[RX Feedback (Passivity)]{Colors.END} {pos_str}")
                         self.last_feedback_log_time = current_time
                     
                     # 모든 모터 초기화 완료 확인
@@ -497,14 +484,16 @@ class MotorController:
         """모터 정보 반환"""
         motor = self.motors[motor_index]
         
-        # ✅ 개선: Passivity 모드에서는 display_positions 사용
-        if Config.PASSIVITY_MODE:
-            current_pos = self.display_positions[motor_index]
-        else:
-            current_pos = self.current_positions[motor_index]
+        # 항상 display_positions 사용 (부드러운 UI)
+        current_pos = self.display_positions[motor_index]
         
         # 각도 계산 (0-1023 범위를 0-300도로 변환)
         angle = (current_pos / 1023.0) * 300.0
+        
+        # Velocity 계산 (Normal 모드에서만)
+        velocity = 0
+        if not Config.PASSIVITY_MODE:
+            velocity = abs(self.target_positions[motor_index] - self.display_positions[motor_index])
         
         return {
             'index': motor_index,
@@ -515,7 +504,7 @@ class MotorController:
             'max': motor.max_val,
             'angle': angle,
             'state': self.motor_states[motor_index],
-            'velocity': abs(self.velocities[motor_index]) if not Config.PASSIVITY_MODE else 0,
+            'velocity': velocity,
             'torque_enabled': self.torque_enabled[motor_index]
         }
     
