@@ -1,134 +1,201 @@
 import cv2
 import numpy as np
-import os
+from ultralytics import YOLO
+from collections import deque
 
-# ================= НАСТРОЙКИ =================
-OUTPUT_DIR = "my_item_dataset" # Новая папка для предметов
-# =============================================
+# ================= КОНФИГУРАЦИЯ =================
+TABLE_WIDTH_CM = 60.0 
+TABLE_HEIGHT_CM = 45.0
 
-os.makedirs(f"{OUTPUT_DIR}/images", exist_ok=True)
-os.makedirs(f"{OUTPUT_DIR}/labels", exist_ok=True)
+# Путь только к модели ПРЕДМЕТА
+MODEL_ITEM_PATH  = r"E:\dron\.venv\weigts\best (1) (1).pt" 
 
-manual_points = []
-saved_count = 0
+CONFIDENCE_ITEM = 0.5
+# ================================================
 
-# Ищем последний номер файла
-existing = os.listdir(f"{OUTPUT_DIR}/images")
-if existing:
-    nums = [int(f.split('_')[1].split('.')[0]) for f in existing if 'img_' in f]
-    if nums: saved_count = max(nums) + 1
+class Smoother:
+    """Сглаживает координаты (скользящее среднее)"""
+    def __init__(self, buffer_size=5):
+        self.buffer = deque(maxlen=buffer_size)
+    
+    def update(self, val):
+        self.buffer.append(val)
+        return sum(self.buffer) / len(self.buffer)
+
+# Сглаживатели
+smooth_x = Smoother(buffer_size=5)
+smooth_y = Smoother(buffer_size=5)
+
+# Глобальные переменные для кликов мыши
+calibration_corners = []
+is_calibrated = False
 
 def mouse_callback(event, x, y, flags, param):
-    global manual_points
-    # Записываем клики (максимум 2 точки: левый-верх и правый-низ)
-    if event == cv2.EVENT_LBUTTONDOWN:
-        if len(manual_points) < 2:
-            manual_points.append((x, y))
+    """Обработка кликов для ручной настройки углов стола"""
+    global calibration_corners, is_calibrated
+    
+    if event == cv2.EVENT_LBUTTONDOWN and not is_calibrated:
+        if len(calibration_corners) < 4:
+            calibration_corners.append((x, y))
+            print(f"Точка {len(calibration_corners)}: {x}, {y}")
 
-def find_active_camera():
-    for index in [0, 1, 2]:
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        if cap.isOpened():
-            for _ in range(5): cap.read()
-            return cap
-    return None
+def order_points(pts):
+    """Сортировка углов: TL, TR, BR, BL"""
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)] 
+    rect[2] = pts[np.argmax(s)] 
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)] 
+    rect[3] = pts[np.argmax(diff)] 
+    return rect
+
+def draw_grid_and_axes(img, matrix, w_cm, h_cm):
+    """Рисует сетку поверх стола для наглядности"""
+    try:
+        _, inv_matrix = cv2.invert(matrix)
+        
+        # Рисуем сетку каждые 10 см
+        for x in range(0, int(w_cm) + 1, 10):
+            p1 = cv2.perspectiveTransform(np.array([[[x, 0]]], dtype=np.float32), inv_matrix)
+            p2 = cv2.perspectiveTransform(np.array([[[x, h_cm]]], dtype=np.float32), inv_matrix)
+            cv2.line(img, tuple(p1[0][0].astype(int)), tuple(p2[0][0].astype(int)), (0, 255, 255), 1)
+        
+        for y in range(0, int(h_cm) + 1, 10):
+            p1 = cv2.perspectiveTransform(np.array([[[0, y]]], dtype=np.float32), inv_matrix)
+            p2 = cv2.perspectiveTransform(np.array([[[w_cm, y]]], dtype=np.float32), inv_matrix)
+            cv2.line(img, tuple(p1[0][0].astype(int)), tuple(p2[0][0].astype(int)), (0, 255, 255), 1)
+            
+        # Подписываем начало координат (0,0)
+        origin = cv2.perspectiveTransform(np.array([[[0, 0]]], dtype=np.float32), inv_matrix)
+        cv2.circle(img, tuple(origin[0][0].astype(int)), 5, (0, 0, 255), -1)
+        
+    except: pass
 
 def main():
-    global manual_points, saved_count
+    global is_calibrated, calibration_corners
     
-    cap = find_active_camera()
-    if not cap:
-        print("Камера не найдена")
+    print("--- ЗАГРУЗКА МОДЕЛИ ПРЕДМЕТА ---")
+    try:
+        net_item = YOLO(MODEL_ITEM_PATH)
+    except Exception as e:
+        print(f"Ошибка модели: {e}")
         return
 
+    # Открываем камеру
+    cap = cv2.VideoCapture(1, cv2.CAP_DSHOW) # Попробуй 0 или 1
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(0)
+    
     cap.set(3, 1280)
     cap.set(4, 720)
 
-    cv2.namedWindow("Item Creator")
-    cv2.setMouseCallback("Item Creator", mouse_callback)
+    # Окно и мышь
+    cv2.namedWindow("Work Area")
+    cv2.setMouseCallback("Work Area", mouse_callback)
 
-    print("--- ИНСТРУКЦИЯ ДЛЯ ПРЕДМЕТА ---")
-    print("1. Кликни Левый-Верхний угол предмета.")
-    print("2. Кликни Правый-Нижний угол предмета.")
-    print("   (Скрипт сам найдет центр захвата)")
-    print("3. Нажми 's' для сохранения.")
-    print("4. 'r' - сброс.")
-    print("-------------------------------")
+    # Реальные размеры стола (для перспективы)
+    real_corners = np.float32([
+        [0, 0], 
+        [TABLE_WIDTH_CM, 0], 
+        [TABLE_WIDTH_CM, TABLE_HEIGHT_CM], 
+        [0, TABLE_HEIGHT_CM]
+    ])
+    
+    perspective_matrix = None
+
+    print("\n=== ИНСТРУКЦИЯ ===")
+    print("Кликните 4 угла стола в любом порядке.")
+    print("Нажмите 'R' чтобы сбросить точки.")
+    print("Нажмите 'Q' для выхода.\n")
 
     while True:
         ret, frame = cap.read()
         if not ret: break
-        
-        display_frame = frame.copy()
-        h, w = frame.shape[:2]
 
-        # Рисуем точки кликов
-        for pt in manual_points:
-            cv2.circle(display_frame, pt, 5, (0, 0, 255), -1)
+        # 1. ЭТАП КАЛИБРОВКИ
+        if not is_calibrated:
+            cv2.putText(frame, f"Click Corners: {len(calibration_corners)}/4", (20, 40), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            
+            # Рисуем кликнутые точки
+            for pt in calibration_corners:
+                cv2.circle(frame, pt, 5, (0, 255, 0), -1)
 
-        # Если есть 2 точки - рисуем прямоугольник и центр
-        if len(manual_points) == 2:
-            pt1 = manual_points[0]
-            pt2 = manual_points[1]
-            
-            # Рисуем зеленую рамку
-            cv2.rectangle(display_frame, pt1, pt2, (0, 255, 0), 2)
-            
-            # Вычисляем центр (точка захвата)
-            cx = int((pt1[0] + pt2[0]) / 2)
-            cy = int((pt1[1] + pt2[1]) / 2)
-            cv2.circle(display_frame, (cx, cy), 8, (0, 255, 255), -1) # Желтая точка
-            
-            cv2.putText(display_frame, "CENTER (GRASP)", (cx + 10, cy), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-            
-            cv2.putText(display_frame, "PRESS 's' TO SAVE", (50, 50), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            # Если набрали 4 точки, считаем матрицу
+            if len(calibration_corners) == 4:
+                pts_src = np.array(calibration_corners, dtype="float32")
+                pts_src = order_points(pts_src) # Упорядочиваем
+                perspective_matrix = cv2.getPerspectiveTransform(pts_src, real_corners)
+                is_calibrated = True
+                print("Калибровка завершена! Начинаем поиск предметов.")
 
-        cv2.putText(display_frame, f"Items Saved: {saved_count}", (w - 250, 50), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        # 2. ЭТАП РАБОТЫ (когда матрица уже есть)
+        else:
+            # Рисуем зону стола (полигон)
+            if perspective_matrix is not None:
+                # Рисуем сетку координат
+                draw_grid_and_axes(frame, perspective_matrix, TABLE_WIDTH_CM, TABLE_HEIGHT_CM)
+                
+                # --- ПОИСК ПРЕДМЕТА (YOLO) ---
+                results = net_item(frame, verbose=False, conf=CONFIDENCE_ITEM)[0]
+                
+                if results.boxes:
+                    for i, box in enumerate(results.boxes):
+                        # Получаем координаты бокса
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        
+                        # Определяем центр предмета
+                        # (Если модель умеет Keypoints - лучше использовать их, 
+                        # если нет - берем центр бокса)
+                        
+                        cx, cy = 0, 0
+                        has_keypoint = False
 
-        cv2.imshow("Item Creator", display_frame)
+                        if results.keypoints is not None and len(results.keypoints.data) > i:
+                            kpt = results.keypoints.data[i][0] # Берем первую точку
+                            if kpt[2] > 0.5: # Если уверенность ок
+                                cx, cy = int(kpt[0]), int(kpt[1])
+                                has_keypoint = True
+                        
+                        # Если кейпоинтов нет, берем центр прямоугольника
+                        if not has_keypoint:
+                            cx = int((x1 + x2) / 2)
+                            cy = int((y1 + y2) / 2)
+
+                        # Рисуем сам предмет
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 100, 0), 2)
+                        cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
+
+                        # --- ПЕРЕВОД В СМ ---
+                        vec = np.array([[[cx, cy]]], dtype=np.float32)
+                        real_pt = cv2.perspectiveTransform(vec, perspective_matrix)
+                        
+                        raw_x = real_pt[0][0][0]
+                        raw_y = real_pt[0][0][1]
+
+                        # Сглаживание
+                        val_x = smooth_x.update(raw_x)
+                        val_y = smooth_y.update(raw_y)
+
+                        # Проверка границ стола
+                        in_bounds = (0 <= val_x <= TABLE_WIDTH_CM) and (0 <= val_y <= TABLE_HEIGHT_CM)
+                        color_text = (0, 255, 0) if in_bounds else (0, 0, 255)
+
+                        # Вывод текста
+                        text = f"X:{val_x:.1f} Y:{val_y:.1f}"
+                        cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color_text, 2)
+
+        # Управление клавишами
         key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'): break
+        if key == ord('r'): # Сброс калибровки
+            calibration_corners = []
+            is_calibrated = False
+            perspective_matrix = None
+            print("Калибровка сброшена.")
 
-        # === СОХРАНЕНИЕ ===
-        if key == ord('s') and len(manual_points) == 2:
-            x1, y1 = manual_points[0]
-            x2, y2 = manual_points[1]
-            
-            # Упорядочиваем координаты (вдруг ты кликнула сначала низ, потом верх)
-            min_x, max_x = min(x1, x2), max(x1, x2)
-            min_y, max_y = min(y1, y2), max(y1, y2)
-
-            # Вычисляем данные для YOLO (нормированные 0..1)
-            box_w = (max_x - min_x) / w
-            box_h = (max_y - min_y) / h
-            box_cx = ((min_x + max_x) / 2) / w
-            box_cy = ((min_y + max_y) / 2) / h
-            
-            # Точка захвата (центр бокса)
-            kpt_x = box_cx
-            kpt_y = box_cy
-
-            # Формат строки: Class 0 (Item) Box_CX Box_CY W H Kpt_X Kpt_Y Vis
-            # Мы используем ID 0, потому что будем учить отдельную модель для предмета
-            yolo_line = f"0 {box_cx:.6f} {box_cy:.6f} {box_w:.6f} {box_h:.6f} {kpt_x:.6f} {kpt_y:.6f} 2"
-
-            filename = f"img_{saved_count:04d}"
-            cv2.imwrite(f"{OUTPUT_DIR}/images/{filename}.jpg", frame)
-            with open(f"{OUTPUT_DIR}/labels/{filename}.txt", "w") as f:
-                f.write(yolo_line)
-
-            print(f"Предмет сохранен: {filename}")
-            saved_count += 1
-            manual_points = [] # Сброс
-
-        elif key == ord('r'):
-            manual_points = []
-            print("Сброс.")
-        
-        elif key == ord('q'):
-            break
+        cv2.imshow("Work Area", frame)
 
     cap.release()
     cv2.destroyAllWindows()
